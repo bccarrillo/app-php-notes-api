@@ -1,16 +1,41 @@
 <?php
 
-require __DIR__ . '/../vendor/autoload.php';
-
-use Google\Cloud\Firestore\FirestoreClient;
-
 header("Content-Type: application/json");
 
-$firestore = new FirestoreClient([
-    'projectId' => getenv('GOOGLE_CLOUD_PROJECT')
-]);
+$projectId = getenv('PROJECT_ID');
+$baseUrl = "https://firestore.googleapis.com/v1/projects/$projectId/databases/(default)/documents/notes";
 
-$collection = $firestore->collection('notes');
+function getAccessToken() {
+    $metadataUrl = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
+    $opts = [
+        "http" => [
+            "method" => "GET",
+            "header" => "Metadata-Flavor: Google"
+        ]
+    ];
+    $context = stream_context_create($opts);
+    $response = file_get_contents($metadataUrl, false, $context);
+    $data = json_decode($response, true);
+    return $data['access_token'];
+}
+
+function firestoreRequest($method, $url, $body = null) {
+    $token = getAccessToken();
+
+    $opts = [
+        "http" => [
+            "method" => $method,
+            "header" => "Authorization: Bearer $token\r\nContent-Type: application/json",
+        ]
+    ];
+
+    if ($body) {
+        $opts["http"]["content"] = json_encode($body);
+    }
+
+    $context = stream_context_create($opts);
+    return file_get_contents($url, false, $context);
+}
 
 $method = $_SERVER['REQUEST_METHOD'];
 $uri = explode('/', trim($_SERVER['REQUEST_URI'], '/'));
@@ -22,68 +47,27 @@ if ($uri[0] === 'health') {
 
 if ($uri[0] === 'notes') {
 
-    // POST /notes
     if ($method === 'POST') {
         $data = json_decode(file_get_contents("php://input"), true);
 
-        if (!isset($data['title']) || !isset($data['content'])) {
-            http_response_code(400);
-            echo json_encode(["error" => "Invalid payload"]);
-            exit;
-        }
+        $payload = [
+            "fields" => [
+                "title" => ["stringValue" => $data["title"]],
+                "content" => ["stringValue" => $data["content"]]
+            ]
+        ];
 
-        $docRef = $collection->add([
-            'title' => $data['title'],
-            'content' => $data['content'],
-            'created_at' => new DateTime()
-        ]);
-
-        echo json_encode(["id" => $docRef->id()]);
+        $response = firestoreRequest("POST", $baseUrl, $payload);
+        echo $response;
         exit;
     }
 
-    // GET /notes
-    if ($method === 'GET' && count($uri) === 1) {
-        $documents = $collection->documents();
-        $result = [];
-
-        foreach ($documents as $document) {
-            if ($document->exists()) {
-                $result[] = [
-                    'id' => $document->id(),
-                    'data' => $document->data()
-                ];
-            }
-        }
-
-        echo json_encode($result);
-        exit;
-    }
-
-    // GET /notes/{id}
-    if ($method === 'GET' && count($uri) === 2) {
-        $snapshot = $collection->document($uri[1])->snapshot();
-
-        if (!$snapshot->exists()) {
-            http_response_code(404);
-            echo json_encode(["error" => "Not found"]);
-            exit;
-        }
-
-        echo json_encode([
-            'id' => $snapshot->id(),
-            'data' => $snapshot->data()
-        ]);
-        exit;
-    }
-
-    // DELETE /notes/{id}
-    if ($method === 'DELETE' && count($uri) === 2) {
-        $collection->document($uri[1])->delete();
-        echo json_encode(["deleted" => true]);
+    if ($method === 'GET') {
+        $response = firestoreRequest("GET", $baseUrl);
+        echo $response;
         exit;
     }
 }
 
 http_response_code(404);
-echo json_encode(["error" => "Route not found"]);
+echo json_encode(["error" => "Not found"]);
